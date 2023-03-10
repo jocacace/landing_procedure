@@ -25,7 +25,7 @@
 #include <ros/package.h>
 #include <iostream>
 #include <fstream>
-
+#include "geometry_msgs/Twist.h"
 
 using namespace Eigen;
 using namespace std;
@@ -53,18 +53,19 @@ class SIMPLE_CLIENT {
 		void land();  
         void joy_cb( sensor_msgs::Joy j );
         void main_loop();
-    
+        void landing_point_cb(geometry_msgs::Twist lp );
     private:
 
         ros::NodeHandle _nh;
         ros::Publisher _target_pub;
         ros::Subscriber _localization_sub;
+        ros::Subscriber _landingpoint_sub;
         ros::Subscriber _joy_data_sub;
         ros::Subscriber _mavros_state_sub;
         bool _first_local_pos;
         bool _enable_joy;
-        bool _phase1_run;
-        bool _phase2_run;
+        bool _enable_phase1;
+        bool _enable_phase2;
 
         // --- Desired state
         Vector3d _cmd_p;
@@ -89,6 +90,20 @@ class SIMPLE_CLIENT {
         ros::ServiceClient _set_mode_client;
         ros::ServiceClient _land_client;
 
+        Eigen::Vector3d _lp;
+        double _lp_yaw;
+        float _ref_dyaw;
+        double _vel_joy_yaw;
+
+        int joy_ax0;
+        int joy_ax1;
+        int joy_ax2;
+        int joy_ax3;
+
+        int camera_0vel;
+        int camera_1vel;
+        int camera_2vel;
+        int camera_yaw_vel;
 
 };
 
@@ -108,6 +123,7 @@ SIMPLE_CLIENT::SIMPLE_CLIENT() {
     _localization_sub = _nh.subscribe( "/mavros/local_position/pose", 1, &SIMPLE_CLIENT::localization_cb, this);
     _mavros_state_sub = _nh.subscribe( "/mavros/state", 1, &SIMPLE_CLIENT::mavros_state_cb, this);
     _joy_data_sub = _nh.subscribe("/joy", 1, &SIMPLE_CLIENT::joy_cb, this);
+    _landingpoint_sub = _nh.subscribe("/landing_point", 1, &SIMPLE_CLIENT::landing_point_cb, this);
 
 	// --- Services ---
     _arming_client = _nh.serviceClient<mavros_msgs::CommandBool>("/mavros/cmd/arming");
@@ -117,10 +133,11 @@ SIMPLE_CLIENT::SIMPLE_CLIENT() {
 
     _vel_joy << 0.0, 0.0, 0.0;
 
-
     _enable_joy = false;
-    _phase1_run = false;
-    _phase2_run = false;
+    _enable_phase1 = false;
+    _enable_phase2 = false;
+    _ref_dyaw = 0.0;
+    _vel_joy_yaw = 0.0;
 
 }
 
@@ -128,6 +145,15 @@ SIMPLE_CLIENT::SIMPLE_CLIENT() {
 
 void SIMPLE_CLIENT::mavros_state_cb( mavros_msgs::State mstate) {
     _mstate = mstate;
+}
+
+void SIMPLE_CLIENT::landing_point_cb(geometry_msgs::Twist lp ) {
+
+    if( lp.linear.x != -1 && lp.linear.y != -1 && lp.linear.z != -1 ) {
+        _lp << lp.linear.x, lp.linear.y, lp.linear.z;
+        _lp_yaw = lp.angular.z;
+        //Todo: add a wd!
+    }
 }
 
 
@@ -166,8 +192,6 @@ void SIMPLE_CLIENT::takeoff( const double altitude ) {
   if( _set_mode_client.call(offb_set_mode) && offb_set_mode.response.mode_sent){
     ROS_INFO("OFFBOARD mode enabled");
   }
-
-
 
   //---Arm
   if( _arming_client.call(arm_cmd) && arm_cmd.response.success){
@@ -217,9 +241,39 @@ void SIMPLE_CLIENT::position_controller(){
     if( !_nh.getParam("ref_vel_max", ref_vel_max)) {
         ref_vel_max = 2.0;
     }
-    if( !_nh.getParam("max_cruise_vel", _cruise_vel)) {
-        _cruise_vel = 2.0;
+    if( !_nh.getParam("joy_ax0", joy_ax0)) {
+        joy_ax0 = 1.0;
     }
+
+    if( !_nh.getParam("joy_ax1", joy_ax1)) {
+        joy_ax1 = 1.0;
+    }
+
+    if( !_nh.getParam("joy_ax2", joy_ax2)) {
+        joy_ax2 = 1.0;
+    }
+
+    if( !_nh.getParam("joy_ax3", joy_ax3)) {
+        joy_ax3 = 1.0;
+    }
+
+    if( !_nh.getParam("camera_0vel", camera_0vel)) {
+        camera_0vel = 1.0;
+    }
+    if( !_nh.getParam("camera_1vel", camera_1vel)) {
+        camera_1vel = 1.0;
+    }
+    if( !_nh.getParam("camera_2vel", camera_2vel)) {
+        camera_2vel = 1.0;
+    }    
+    if( !_nh.getParam("camera_yaw_vel", camera_yaw_vel)) {
+        camera_yaw_vel = 1.0;
+    }
+
+
+    
+
+
 
     mavros_msgs::PositionTarget ptarget;
     ptarget.coordinate_frame = mavros_msgs::PositionTarget::FRAME_LOCAL_NED;
@@ -231,8 +285,8 @@ void SIMPLE_CLIENT::position_controller(){
     mavros_msgs::PositionTarget::IGNORE_AFY |
     mavros_msgs::PositionTarget::IGNORE_AFZ |
     mavros_msgs::PositionTarget::FORCE |
-    mavros_msgs::PositionTarget::IGNORE_YAW |
-    mavros_msgs::PositionTarget::IGNORE_YAW_RATE; // |
+    mavros_msgs::PositionTarget::IGNORE_YAW;
+    //mavros_msgs::PositionTarget::IGNORE_YAW_RATE; // |
 
     while( !_first_local_pos )
         usleep(0.1*1e6);
@@ -306,10 +360,12 @@ void SIMPLE_CLIENT::position_controller(){
 
         //---Publish command
         ptarget.header.stamp = ros::Time::now();
-        ptarget.position.x = _ref_p[0];
-        ptarget.position.y = _ref_p[1];
-        ptarget.position.z = _ref_p[2];
+        ptarget.position.x = _cmd_p[0];
+        ptarget.position.y = _cmd_p[1];
+        ptarget.position.z = _cmd_p[2];
         ptarget.yaw = _cmd_yaw;
+        ptarget.yaw_rate = _ref_dyaw;
+        
         _target_pub.publish( ptarget );
         //---
 
@@ -333,11 +389,15 @@ void SIMPLE_CLIENT::land() {
 
 void SIMPLE_CLIENT::joy_cb( sensor_msgs::Joy j ) {
 
-
     if( j.buttons[0] == 1 ) _enable_joy = true;
-    _vel_joy[0] = j.axes[1]*0.2;
-    _vel_joy[1] = j.axes[0]*0.2;
-    _vel_joy[2] = j.axes[4]*0.2;
+    if( j.buttons[2] == 1 ) _enable_phase1 = true;
+    if( j.buttons[3] == 1 ) _enable_phase2 = true;
+
+
+    _vel_joy[0] = joy_ax0*j.axes[1]*0.2;
+    _vel_joy[1] = joy_ax1*j.axes[0]*0.2;
+    _vel_joy[2] = joy_ax2*j.axes[4]*0.2;
+    _vel_joy_yaw = joy_ax3*j.axes[3]*0.2;
     
 
 }
@@ -427,32 +487,106 @@ void SIMPLE_CLIENT::main_loop () {
     int phase2_cnt = 0;
 
     bool joy_ctrl = false;
+    bool phase1_ctrl = false;
+    bool phase2_ctrl = false;
+    
+    float kdp = 0.1;
+
+    Eigen::Vector3d ep;
+    Eigen::Vector3d dvel;
+    float eyaw = 0.0;
 
     ros::Rate r(10);
-    while( ros::ok() ) {
 
+    while( ros::ok() ) {
 
         enable_joy_cnt++;
         phase1_cnt++;
         phase2_cnt++;
 
-
         if( _enable_joy == true && enable_joy_cnt > 50) {
             joy_ctrl = !joy_ctrl;
             enable_joy_cnt = 0;
             _enable_joy = false;
+            if( joy_ctrl ) {
+                phase1_ctrl = phase2_ctrl = false;
+            }
+            cout << "JOY CTRL: " << joy_ctrl << endl;
         }
 
-        if( joy_ctrl ) {
-            ROS_INFO("JOOOOOOY");
+        if (_enable_phase1 == true && phase1_cnt > 50 ) {
+            phase1_cnt = 0;
+            phase1_ctrl = !phase1_ctrl;
+            _enable_phase1 = false;
+            if( phase1_ctrl ) {
+                joy_ctrl = phase2_ctrl = false;
+            }
+            cout << "PHASE1 CTRL: " << phase1_ctrl << endl;
+
+        }
+
+        if (_enable_phase2 == true && phase2_cnt > 50 ) {
+            phase2_cnt = 0;
+            phase2_ctrl = !phase2_ctrl;
+            _enable_phase2 = false;
+            if( phase2_ctrl ) {
+                joy_ctrl = phase1_ctrl = false;
+            }
+            cout << "PHASE2 CTRL: " << phase2_ctrl << endl;
+
+        }
+        
+        if( joy_ctrl ) {            
             if( _mstate.mode == "OFFBOARD" ) {
-                _ref_p[0] += _vel_joy[0];
-                _ref_p[1] += _vel_joy[1];
-                _ref_p[2] += _vel_joy[2];
-                _cmd_p = _ref_p;
+
+                _cmd_p[0] += _vel_joy[0]*(1/10.0);
+                _cmd_p[1] += _vel_joy[1]*(1/10.0);
+                _cmd_p[2] += _vel_joy[2]*(1/10.0);
+                _ref_dyaw = _vel_joy_yaw;
+                //cout << "_ref_dyaw: " << _ref_dyaw << endl;
+                //_cmd_p = _ref_p;
             }
         }
 
+        if( phase1_ctrl ) {
+            
+            eyaw = _lp_yaw - M_PI/2.0;            
+            if(_lp_yaw > 0.0 )        
+                _ref_dyaw = camera_yaw_vel*-0.05*eyaw;
+            else
+                _ref_dyaw = camera_yaw_vel*0.05*eyaw;
+            
+
+            if( norm(eyaw) < 0.1 ) {
+
+                ep << _lp[1], -_lp[0], 0.0;
+                //ep << 0, 1, 0;
+                
+                cout << "lp2: " << _lp[2]  << endl;
+                ep[2] =( _lp[2] > 1) ? (_lp[2]-1) : 0.0;
+                ep[0] = 0.0;
+                //ep[2] = 0.0;
+                cout << "ep: " << ep.transpose() << endl;
+                dvel = 0.1*ep;
+                cout << "dvel: " << dvel.transpose() << endl;
+
+
+                _cmd_p[0] += camera_0vel*dvel[0]*(1/10.0);
+                _cmd_p[1] += camera_1vel*dvel[1]*(1/10.0);
+                _cmd_p[2] += camera_2vel*dvel[2]*(1/10.0);
+                //_ref_p = _cmd_p;
+                cout << "_cmd_p: " << _cmd_p.transpose() << endl;
+                //_cmd_p = _ref_p;
+                
+                //check this!
+            }
+
+
+        }
+
+        if( phase2_ctrl ) { 
+
+        }
 
         r.sleep();
     }

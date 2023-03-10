@@ -1,0 +1,9 @@
+<?xml version="1.0" ?>
+
+<launch>
+
+
+  <rosparam command="load" file="$(find landing_procedure)/conf/params.yaml" />
+  <node pkg="landing_procedure" type="landing" name ="landing" output="screen" />
+
+</launch>	
